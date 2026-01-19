@@ -1,6 +1,7 @@
 ﻿import asyncio
 import json
 import os
+import time
 from aiohttp import web
 import base64
 
@@ -194,7 +195,56 @@ async def home(request):
             const WS_URL = 'wss://' + window.location.host + '/ws';
             let socket = null;
             let audioContext = null;
+            let audioQueue = [];
             let packetCount = 0;
+            
+            // Упрощенное воспроизведение аудио
+            function playAudioSimple(base64Data) {
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                
+                try {
+                    // Конвертируем base64 в ArrayBuffer
+                    const binaryStr = atob(base64Data);
+                    const len = binaryStr.length;
+                    
+                    // Проверяем что данные не пустые
+                    if (len < 100) {
+                        console.log('Audio data too small:', len);
+                        return;
+                    }
+                    
+                    const bytes = new Uint8Array(len);
+                    for (let i = 0; i < len; i++) {
+                        bytes[i] = binaryStr.charCodeAt(i);
+                    }
+                    
+                    // Создаем AudioBuffer (моно, 44100 Гц)
+                    const buffer = audioContext.createBuffer(1, len / 2, 44100);
+                    const channelData = buffer.getChannelData(0);
+                    
+                    // Конвертируем int16 в float32
+                    for (let i = 0; i < len; i += 2) {
+                        // Объединяем два байта в 16-битное число
+                        const byte1 = bytes[i];
+                        const byte2 = bytes[i + 1] || 0;
+                        const int16 = (byte2 << 8) | byte1;
+                        
+                        // Конвертируем в float (-1 to 1)
+                        channelData[i / 2] = int16 / 32768.0;
+                    }
+                    
+                    // Воспроизводим
+                    const source = audioContext.createBufferSource();
+                    source.buffer = buffer;
+                    source.connect(audioContext.destination);
+                    source.start();
+                    
+                } catch (error) {
+                    console.log('Audio error:', error);
+                }
+            }
             
             function connectWebSocket() {
                 if (socket && socket.readyState === WebSocket.OPEN) return;
@@ -214,7 +264,8 @@ async def home(request):
                     // Register as listener
                     socket.send(JSON.stringify({
                         type: 'listener',
-                        device: 'web_interface'
+                        device: 'web_interface',
+                        timestamp: Date.now()
                     }));
                 };
                 
@@ -228,6 +279,8 @@ async def home(request):
                             
                             if (data.has_source) {
                                 document.getElementById('audioIndicator').classList.add('active');
+                            } else {
+                                document.getElementById('audioIndicator').classList.remove('active');
                             }
                         }
                         else if (data.type === 'audio') {
@@ -235,13 +288,13 @@ async def home(request):
                             document.getElementById('packetCount').textContent = packetCount;
                             document.getElementById('audioIndicator').classList.add('active');
                             
-                            // Play audio if data exists
-                            if (data.data) {
-                                playAudio(data.data);
+                            // Воспроизводим аудио
+                            if (data.data && data.data.length > 100) {
+                                playAudioSimple(data.data);
                             }
                         }
                     } catch (error) {
-                        console.error('Error:', error);
+                        console.error('Error processing message:', error);
                     }
                 };
                 
@@ -274,29 +327,6 @@ async def home(request):
                 packetCount = 0;
                 document.getElementById('packetCount').textContent = '0';
                 document.getElementById('sourcesCount').textContent = '0';
-            }
-            
-            function playAudio(base64Data) {
-                if (!audioContext) {
-                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                }
-                
-                try {
-                    const binaryString = atob(base64Data);
-                    const bytes = new Uint8Array(binaryString.length);
-                    for (let i = 0; i < binaryString.length; i++) {
-                        bytes[i] = binaryString.charCodeAt(i);
-                    }
-                    
-                    audioContext.decodeAudioData(bytes.buffer, function(buffer) {
-                        const source = audioContext.createBufferSource();
-                        source.buffer = buffer;
-                        source.connect(audioContext.destination);
-                        source.start();
-                    });
-                } catch (error) {
-                    console.error('Audio error:', error);
-                }
             }
             
             function updateStatus(message, type) {
