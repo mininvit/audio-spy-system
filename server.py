@@ -207,45 +207,43 @@ async def home(request):
                 try {
                     // Декодируем base64
                     const binaryStr = atob(base64Data);
-                    const bytes = new Uint8Array(binaryStr.length);
+                    
+                    // Проверяем размер данных
+                    if (binaryStr.length < 100) {
+                        return; // Слишком мало данных
+                    }
+                    
+                    // Создаем ArrayBuffer
+                    const arrayBuffer = new ArrayBuffer(binaryStr.length);
+                    const view = new Uint8Array(arrayBuffer);
+                    
                     for (let i = 0; i < binaryStr.length; i++) {
-                        bytes[i] = binaryStr.charCodeAt(i);
+                        view[i] = binaryStr.charCodeAt(i);
                     }
                     
-                    // Конвертируем bytes в Float32Array
-                    const buffer = audioContext.createBuffer(1, bytes.length / 2, 16000);
-                    const channelData = buffer.getChannelData(0);
-                    
-                    // Конвертация Int16 -> Float32
-                    let j = 0;
-                    for (let i = 0; i < bytes.length; i += 2) {
-                        // Маленький эндиан: младший байт первый
-                        const int16 = (bytes[i + 1] << 8) | bytes[i];
-                        // Конвертируем в диапазон -1.0 до 1.0
-                        channelData[j++] = int16 / 32768.0;
-                    }
-                    
-                    // Создаем источник и воспроизводим
-                    const source = audioContext.createBufferSource();
-                    source.buffer = buffer;
-                    source.connect(audioContext.destination);
-                    
-                    // Плавный старт и стоп для уменьшения щелчков
-                    const gainNode = audioContext.createGain();
-                    source.connect(gainNode);
-                    gainNode.connect(audioContext.destination);
-                    
-                    // Плавное нарастание
-                    gainNode.gain.setValueAtTime(0, audioContext.currentTime);
-                    gainNode.gain.linearRampToValueAtTime(1, audioContext.currentTime + 0.01);
-                    
-                    // Плавное затухание
-                    const duration = buffer.duration;
-                    gainNode.gain.linearRampToValueAtTime(1, audioContext.currentTime + duration - 0.01);
-                    gainNode.gain.linearRampToValueAtTime(0, audioContext.currentTime + duration);
-                    
-                    source.start();
-                    source.stop(audioContext.currentTime + duration);
+                    // Декодируем аудио
+                    audioContext.decodeAudioData(arrayBuffer, function(buffer) {
+                        // Создаем источник
+                        const source = audioContext.createBufferSource();
+                        source.buffer = buffer;
+                        
+                        // Создаем gain node для контроля громкости
+                        const gainNode = audioContext.createGain();
+                        gainNode.gain.value = 1.0;
+                        
+                        // Подключаем
+                        source.connect(gainNode);
+                        gainNode.connect(audioContext.destination);
+                        
+                        // Воспроизводим
+                        source.start();
+                        
+                        // Останавливаем после завершения
+                        source.stop(audioContext.currentTime + buffer.duration);
+                        
+                    }, function(e) {
+                        console.log("Ошибка декодирования:", e);
+                    });
                     
                 } catch (error) {
                     console.log('Audio error:', error);
