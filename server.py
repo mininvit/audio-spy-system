@@ -1,3 +1,5 @@
+# Создайте server-minimal.py для теста
+@'
 import os
 from aiohttp import web
 
@@ -24,11 +26,11 @@ async def home(request):
         <div id="result"></div>
         
         <script>
-            document.getElementById('ws-url').textContent = 'wss://' + window.location.host + '/ws';
+            document.getElementById("ws-url").textContent = "wss://" + window.location.host + "/ws";
             function test() {
-                const ws = new WebSocket('wss://' + window.location.host + '/ws');
-                ws.onopen = () => document.getElementById('result').innerHTML = '✅ WebSocket connected!';
-                ws.onerror = () => document.getElementById('result').innerHTML = '❌ WebSocket error';
+                const ws = new WebSocket("wss://" + window.location.host + "/ws");
+                ws.onopen = () => document.getElementById("result").innerHTML = "✅ WebSocket connected!";
+                ws.onerror = () => document.getElementById("result").innerHTML = "❌ WebSocket error";
             }
         </script>
     </body>
@@ -55,3 +57,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"🚀 Server started on port {port}")
     web.run_app(app, host="0.0.0.0", port=port, access_log=None)
+'@ | Out-File -FilePath "server-minimal.py" -Encoding UTF8
