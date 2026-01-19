@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-АУДИО КЛИЕНТ ДЛЯ RENDER.COM
-Подключается к вашему серверу на Render
+АУДИО КЛИЕНТ - РАБОЧАЯ ВЕРСИЯ
 """
 import asyncio
 import websockets
@@ -14,81 +13,57 @@ import numpy as np
 import sounddevice as sd
 
 # ========== НАСТРОЙКИ ==========
-# ВАШ АДРЕС НА RENDER - ЗАМЕНИТЕ НА СВОЙ!
-SERVER_URL = "wss://audio-spy-system.onrender.com/ws"  # <-- ЗАМЕНИТЕ НА СВОЙ URL!
+SERVER_URL = "ws://localhost:8000/ws"
+SAMPLE_RATE = 16000
+CHUNK_SIZE = 1024
+CHANNELS = 1
 
-# Аудио параметры
-SAMPLE_RATE = 16000      # 16 kHz
-CHUNK_SIZE = 1024        # Размер чанка
-CHANNELS = 1             # Моно
-
-class RenderAudioClient:
+class AudioClient:
     def __init__(self):
         self.running = True
         self.ws = None
         self.stream = None
         self.packet_count = 0
-        self.start_time = time.time()
         
-    def print_info(self):
-        """Информация о подключении"""
-        print("\n" + "="*60)
-        print("🎧 АУДИО КЛИЕНТ ДЛЯ RENDER.COM")
-        print("="*60)
-        print(f"Сервер: {SERVER_URL}")
-        print(f"Частота: {SAMPLE_RATE} Гц")
-        print(f"Чанк: {CHUNK_SIZE} сэмплов")
-        print("="*60)
-        
-        # Информация о микрофоне
-        try:
-            default_input = sd.default.device[0]
-            device_info = sd.query_devices(default_input)
-            print(f"🎤 Микрофон: {device_info['name']}")
-        except:
-            print("🎤 Используется микрофон по умолчанию")
-    
     async def connect(self):
-        """Подключение к серверу на Render"""
-        print(f"\n🔗 Подключение к серверу Render...")
+        """Подключение к серверу"""
+        print(f"🔗 Подключение к {SERVER_URL}...")
         
-        for attempt in range(5):
-            try:
-                self.ws = await websockets.connect(
-                    SERVER_URL,
-                    ping_interval=20,
-                    ping_timeout=10
-                )
-                
-                await self.ws.send(json.dumps({
-                    "type": "spy",
-                    "sample_rate": SAMPLE_RATE,
-                    "chunk_size": CHUNK_SIZE,
-                    "channels": CHANNELS,
-                    "client": "render_client"
-                }))
-                
-                print("✅ Успешно подключено к Render!")
-                return True
-                
-            except Exception as e:
-                print(f"❌ Попытка {attempt+1}/5: {e}")
-                if attempt < 4:
-                    print("⏳ Повтор через 3 секунды...")
-                    await asyncio.sleep(3)
-        
-        print("\n❌ Не удалось подключиться к серверу")
-        print("Проверьте:")
-        print("1. Сервер запущен на Render.com")
-        print("2. URL правильный:", SERVER_URL)
-        print("3. Сервис активен (бесплатные чаты не закончились)")
-        return False
+        try:
+            self.ws = await websockets.connect(SERVER_URL)
+            
+            await self.ws.send(json.dumps({
+                "type": "spy",
+                "sample_rate": SAMPLE_RATE,
+                "chunk_size": CHUNK_SIZE,
+                "channels": CHANNELS
+            }))
+            
+            print("✅ Подключено к серверу")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Ошибка подключения: {e}")
+            return False
     
     def setup_microphone(self):
         """Настройка микрофона"""
         print("\n🎤 Настройка микрофона...")
         
         try:
+            # Тест микрофона
+            print("Тест микрофона (3 секунды)...")
+            recording = sd.rec(int(3 * SAMPLE_RATE), 
+                             samplerate=SAMPLE_RATE, 
+                             channels=CHANNELS,
+                             dtype='int16')
+            sd.wait()
+            
+            audio = recording.flatten().astype(np.float32) / 32768.0
+            rms = np.sqrt(np.mean(audio**2))
+            print(f"Уровень теста: {rms:.4f}")
+            
+            # Запуск микрофона
             self.stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
                 blocksize=CHUNK_SIZE,
@@ -111,6 +86,8 @@ class RenderAudioClient:
         print("Ctrl+C для остановки")
         print("-" * 50)
         
+        start_time = time.time()
+        
         while self.running and self.ws:
             try:
                 # Читаем аудио
@@ -123,6 +100,10 @@ class RenderAudioClient:
                 audio_int16 = data.astype(np.int16)
                 audio_bytes = audio_int16.tobytes()
                 
+                # Проверяем размер
+                if len(audio_bytes) != CHUNK_SIZE * 2:
+                    continue
+                
                 # Отправляем
                 encoded = base64.b64encode(audio_bytes).decode('ascii')
                 
@@ -130,8 +111,7 @@ class RenderAudioClient:
                     "type": "audio",
                     "data": encoded,
                     "packet_id": self.packet_count,
-                    "timestamp": time.time(),
-                    "sample_rate": SAMPLE_RATE
+                    "timestamp": time.time()
                 }))
                 
                 self.packet_count += 1
@@ -143,23 +123,22 @@ class RenderAudioClient:
                     level = int(min(rms * 40, 30))
                     bars = '█' * level
                     
-                    elapsed = time.time() - self.start_time
+                    elapsed = time.time() - start_time
                     rate = self.packet_count / elapsed if elapsed > 0 else 0
                     
                     print(f"\r🔊 [{bars:30}] {rms:.3f} | Пакеты: {self.packet_count} | {rate:.1f}/сек", end="")
                 
                 await asyncio.sleep(0.001)
                 
-            except websockets.exceptions.ConnectionClosed:
-                print("\n⚠️  Соединение разорвано")
-                break
             except Exception as e:
-                print(f"\n⚠️  Ошибка: {e}")
-                await asyncio.sleep(0.1)
+                print(f"\n⚠️  Ошибка отправки: {e}")
+                break
     
     async def run(self):
         """Основной цикл"""
-        self.print_info()
+        print("\n" + "="*60)
+        print("🎧 АУДИО КЛИЕНТ")
+        print("="*60)
         
         if not await self.connect():
             return
@@ -190,19 +169,14 @@ class RenderAudioClient:
             await self.ws.close()
             print("✅ Соединение закрыто")
         
-        total_time = time.time() - self.start_time
         print(f"\n📊 Отправлено пакетов: {self.packet_count}")
-        print(f"📊 Общее время: {total_time:.1f} сек")
-        if total_time > 0:
-            print(f"📊 Скорость: {self.packet_count/total_time:.1f} пакетов/сек")
-        
-        print("\n👋 Завершено")
+        print("👋 Завершено")
 
 def main():
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     
-    client = RenderAudioClient()
+    client = AudioClient()
     
     try:
         asyncio.run(client.run())

