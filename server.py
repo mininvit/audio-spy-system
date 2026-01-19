@@ -205,41 +205,47 @@ async def home(request):
                 }
                 
                 try {
-                    // Конвертируем base64 в ArrayBuffer
+                    // Декодируем base64
                     const binaryStr = atob(base64Data);
-                    const len = binaryStr.length;
-                    
-                    // Проверяем что данные не пустые
-                    if (len < 100) {
-                        console.log('Audio data too small:', len);
-                        return;
-                    }
-                    
-                    const bytes = new Uint8Array(len);
-                    for (let i = 0; i < len; i++) {
+                    const bytes = new Uint8Array(binaryStr.length);
+                    for (let i = 0; i < binaryStr.length; i++) {
                         bytes[i] = binaryStr.charCodeAt(i);
                     }
                     
-                    // Создаем AudioBuffer (моно, 44100 Гц)
-                    const buffer = audioContext.createBuffer(1, len / 2, 44100);
+                    // Конвертируем bytes в Float32Array
+                    const buffer = audioContext.createBuffer(1, bytes.length / 2, 16000);
                     const channelData = buffer.getChannelData(0);
                     
-                    // Конвертируем int16 в float32
-                    for (let i = 0; i < len; i += 2) {
-                        // Объединяем два байта в 16-битное число
-                        const byte1 = bytes[i];
-                        const byte2 = bytes[i + 1] || 0;
-                        const int16 = (byte2 << 8) | byte1;
-                        
-                        // Конвертируем в float (-1 to 1)
-                        channelData[i / 2] = int16 / 32768.0;
+                    // Конвертация Int16 -> Float32
+                    let j = 0;
+                    for (let i = 0; i < bytes.length; i += 2) {
+                        // Маленький эндиан: младший байт первый
+                        const int16 = (bytes[i + 1] << 8) | bytes[i];
+                        // Конвертируем в диапазон -1.0 до 1.0
+                        channelData[j++] = int16 / 32768.0;
                     }
                     
-                    // Воспроизводим
+                    // Создаем источник и воспроизводим
                     const source = audioContext.createBufferSource();
                     source.buffer = buffer;
                     source.connect(audioContext.destination);
+                    
+                    // Плавный старт и стоп для уменьшения щелчков
+                    const gainNode = audioContext.createGain();
+                    source.connect(gainNode);
+                    gainNode.connect(audioContext.destination);
+                    
+                    // Плавное нарастание
+                    gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+                    gainNode.gain.linearRampToValueAtTime(1, audioContext.currentTime + 0.01);
+                    
+                    // Плавное затухание
+                    const duration = buffer.duration;
+                    gainNode.gain.linearRampToValueAtTime(1, audioContext.currentTime + duration - 0.01);
+                    gainNode.gain.linearRampToValueAtTime(0, audioContext.currentTime + duration);
+                    
                     source.start();
+                    source.stop(audioContext.currentTime + duration);
                     
                 } catch (error) {
                     console.log('Audio error:', error);
