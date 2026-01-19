@@ -1,1 +1,2 @@
-﻿aiohttp>=3.9.0
+"aiohttp>=3.9.0
+websockets>=11.0.3" | Out-File -FilePath "requirements.txt" -Encoding UTF8
