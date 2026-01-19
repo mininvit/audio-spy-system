@@ -1,8 +1,4 @@
-﻿# Создайте новый server.py с полным функционалом
-Remove-Item server.py -Force
-
-@'
-import asyncio
+﻿import asyncio
 import json
 import os
 from aiohttp import web
@@ -435,4 +431,3 @@ if __name__ == '__main__':
     print(f"📡 WebSocket: wss://audio-spy-system.onrender.com/ws")
     print(f"🔧 Waiting for connections...")
     web.run_app(app, host='0.0.0.0', port=port)
-'@ | Out-File -FilePath "server.py" -Encoding UTF8
