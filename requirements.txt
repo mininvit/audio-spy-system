@@ -1,0 +1,4 @@
+# Создайте requirements.txt
+@'
+aiohttp==3.9.0
+'@ | Set-Content -Path "requirements.txt" -Encoding UTF8
